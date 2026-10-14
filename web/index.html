@@ -16,8 +16,13 @@
   main { width: min(960px, 94vw); padding: 32px 0; }
   header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
   h1 { font-size: 18px; font-weight: 650; letter-spacing: .4px; margin: 0; }
+  .adminlink {
+    margin-left: auto; font-size: 12px; color: #6d768c; text-decoration: none;
+    border: 1px solid #2a3142; border-radius: 999px; padding: 4px 12px;
+  }
+  .adminlink:hover { color: #e8ecf3; border-color: #4f8cff; }
   .pill {
-    margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+    margin-left: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
     padding: 4px 10px; border-radius: 999px; border: 1px solid #3a4152; color: #8b93a7;
   }
   .pill.on { color: #6ee7a0; border-color: #2f6b47; background: #12271a; }
@@ -40,6 +45,7 @@
 <main>
   <header>
     <h1>StreamStation</h1>
+    <a class="adminlink" href="/admin">admin</a>
     <span id="live" class="pill">off air</span>
   </header>
   <div class="player">
@@ -185,7 +191,11 @@
         (s.duration_secs ? Math.min(100, 100 * s.offset_secs / s.duration_secs) : 0) + "%";
 
       var live = document.getElementById("live");
-      live.textContent = s.playing ? "on air" : (s.viewers > 0 ? "tuning" : "off air");
+      if (s.admin_only) {
+        live.textContent = "admin only";
+      } else {
+        live.textContent = s.playing ? "on air" : (s.viewers > 0 ? "tuning" : "off air");
+      }
       live.className = "pill" + (s.playing ? " on" : "");
 
       if (!s.playing) {

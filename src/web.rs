@@ -1,13 +1,14 @@
 use crate::broadcaster::StationRuntime;
-use crate::playlist::{Station, deterministic_order};
-use crate::scan;
-use anyhow::Result;
+use crate::schedule::{self, ApplyOutcome, ScheduleFile, ShuffleMode};
+use anyhow::{Result, anyhow};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::debug;
@@ -15,10 +16,15 @@ use tracing::debug;
 pub fn router(rt: Arc<StationRuntime>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/admin", get(admin_page))
+        .route("/admin-core.js", get(admin_core))
         .route("/api/status", get(status))
         .route("/api/heartbeat", post(heartbeat))
         .route("/api/leave", post(leave))
         .route("/api/rescan", post(rescan))
+        .route("/api/schedule", get(schedule_get).put(schedule_put))
+        .route("/api/schedule/shuffle", post(schedule_shuffle))
+        .route("/api/library", get(library))
         .route("/hls/index.m3u8", get(playlist))
         .route("/hls/{name}", get(segment))
         .with_state(rt)
@@ -28,9 +34,26 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
 
+async fn admin_page() -> Html<&'static str> {
+    Html(include_str!("../web/admin.html"))
+}
+
+async fn admin_core() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("../web/admin-core.js"),
+    )
+        .into_response()
+}
+
 #[derive(Serialize)]
 struct StatusResponse {
     playing: bool,
+    admin_only: bool,
     viewers: usize,
     count: usize,
     index: Option<usize>,
@@ -64,6 +87,7 @@ async fn status(State(rt): State<Arc<StationRuntime>>) -> Json<StatusResponse> {
 
     Json(StatusResponse {
         playing: rt.is_playing(),
+        admin_only: rt.cfg.admin_only,
         viewers: rt.presence.count(),
         count: station.entries.len(),
         index,
@@ -104,25 +128,86 @@ async fn leave(
     Json(ViewersResponse { viewers })
 }
 
-#[derive(Serialize)]
-struct RescanResponse {
-    files: usize,
-    total_secs: f64,
+async fn rescan(State(rt): State<Arc<StationRuntime>>) -> Result<Json<ApplyOutcome>, ApiError> {
+    let outcome = schedule::refresh(&rt).await?;
+    schedule::exit_if_empty(&rt, &outcome);
+    Ok(Json(outcome))
 }
 
-async fn rescan(State(rt): State<Arc<StationRuntime>>) -> Result<Json<RescanResponse>, ApiError> {
-    let _guard = rt.rescan_lock.lock().await;
-    let cfg = &rt.cfg;
-    let cache_path = cfg.cache_dir.join("movies.json");
-    let items = scan::scan(&cfg.path, &cfg.extensions, &cache_path).await?;
-    let ordered = deterministic_order(items, cfg.shuffle_seed);
-    let station = Station::new(ordered, SystemTime::now());
-    let response = RescanResponse {
-        files: station.entries.len(),
-        total_secs: station.total.as_secs_f64(),
+async fn schedule_get(
+    State(rt): State<Arc<StationRuntime>>,
+) -> Result<Json<schedule::ScheduleView>, ApiError> {
+    Ok(Json(schedule::view(&rt).await?))
+}
+
+#[derive(Deserialize)]
+struct ScheduleUpdate {
+    entries: Vec<PathBuf>,
+}
+
+async fn schedule_put(
+    State(rt): State<Arc<StationRuntime>>,
+    Json(req): Json<ScheduleUpdate>,
+) -> Result<Json<ApplyOutcome>, ApiError> {
+    let outcome = schedule::apply_entries(&rt, req.entries).await?;
+    schedule::exit_if_empty(&rt, &outcome);
+    Ok(Json(outcome))
+}
+
+#[derive(Deserialize)]
+struct ShuffleRequest {
+    mode: String,
+}
+
+async fn schedule_shuffle(
+    State(rt): State<Arc<StationRuntime>>,
+    Json(req): Json<ShuffleRequest>,
+) -> Result<Json<ApplyOutcome>, ApiError> {
+    let mode = match req.mode.as_str() {
+        "reset" => ShuffleMode::Reset,
+        "random" => ShuffleMode::Random,
+        other => return Err(anyhow!("unknown shuffle mode '{other}'").into()),
     };
-    rt.swap_station(Arc::new(station)).await;
-    Ok(Json(response))
+    let outcome = schedule::shuffle(&rt, mode).await?;
+    schedule::exit_if_empty(&rt, &outcome);
+    Ok(Json(outcome))
+}
+
+#[derive(Serialize)]
+struct LibraryFile {
+    path: PathBuf,
+    title: String,
+    duration_secs: f64,
+    in_schedule: bool,
+}
+
+#[derive(Serialize)]
+struct LibraryView {
+    files: Vec<LibraryFile>,
+}
+
+async fn library(State(rt): State<Arc<StationRuntime>>) -> Result<Json<LibraryView>, ApiError> {
+    let in_schedule: HashSet<PathBuf> = ScheduleFile::load(&rt.cfg.schedule_path)?
+        .map(|schedule| schedule.paths().into_iter().collect())
+        .unwrap_or_default();
+
+    let files = rt
+        .library
+        .read()
+        .await
+        .iter()
+        .map(|(path, duration)| LibraryFile {
+            title: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            in_schedule: in_schedule.contains(path),
+            duration_secs: duration.as_secs_f64(),
+            path: path.clone(),
+        })
+        .collect();
+
+    Ok(Json(LibraryView { files }))
 }
 
 async fn playlist(State(rt): State<Arc<StationRuntime>>) -> Response {

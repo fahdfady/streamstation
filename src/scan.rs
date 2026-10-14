@@ -60,11 +60,25 @@ pub async fn scan(
     })
     .await?;
 
+    let count = files.len();
+    let mut items = probe_all(std::mem::take(&mut files), cache_path).await;
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    info!("scanned {dir_label}: {count} matching files, {} playable", items.len());
+    Ok(items)
+}
+
+/// Duration lookup for an explicit list of paths (schedule reconciliation and
+/// admin edits). Files that are missing or fail to probe are simply omitted.
+pub async fn durations_for(files: Vec<PathBuf>, cache_path: &Path) -> Vec<(PathBuf, Duration)> {
+    probe_all(files, cache_path).await
+}
+
+async fn probe_all(files: Vec<PathBuf>, cache_path: &Path) -> Vec<(PathBuf, Duration)> {
     let cache_file = load_cache(cache_path);
     let cached: Arc<HashMap<String, CacheEntry>> = Arc::new(cache_file.files);
     let semaphore = Arc::new(Semaphore::new(PROBE_CONCURRENCY));
 
-    let results = futures_util::stream::iter(files.drain(..).map(|path| {
+    let results = futures_util::stream::iter(files.into_iter().map(|path| {
         let cached = cached.clone();
         let semaphore = semaphore.clone();
         async move { resolve(&path, &cached, semaphore).await }
@@ -82,10 +96,8 @@ pub async fn scan(
         items.push((path, duration));
     }
 
-    items.sort_by(|a, b| a.0.cmp(&b.0));
     save_cache(cache_path, &fresh_cache).await;
-    info!("scanned {dir_label}: {} playable files", items.len());
-    Ok(items)
+    items
 }
 
 async fn resolve(

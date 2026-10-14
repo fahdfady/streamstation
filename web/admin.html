@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamStation admin</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: radial-gradient(1200px 600px at 50% -10%, #1c2230, #0b0d12 60%);
+    color: #e8ecf3; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { width: min(1080px, 94vw); margin: 0 auto; padding: 28px 0 64px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: .4px; margin: 0; }
+  header a { color: #8b93a7; text-decoration: none; }
+  header a:hover { color: #e8ecf3; }
+  .onair { margin-left: auto; color: #8b93a7; font-variant-numeric: tabular-nums; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
+  button {
+    background: #202634; color: #e8ecf3; border: 1px solid #333c4f;
+    border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: #4f8cff; }
+  button.danger { border-color: #6b2f3a; color: #f0a0ad; }
+  button.ghost { border-color: #2a3142; color: #9aa3b8; }
+  .spacer { flex: 1; }
+  .muted { color: #8b93a7; font-variant-numeric: tabular-nums; }
+  #banner { display: none; margin: 10px 0; padding: 10px 14px; border-radius: 10px; font-size: 13px; white-space: pre-line; }
+  #banner.warn { display: block; background: #2b2410; border: 1px solid #6b5a1e; color: #e8d48a; }
+  #banner.error { display: block; background: #2b1418; border: 1px solid #6b2f3a; color: #f0a0ad; }
+  .panel { margin-top: 18px; border: 1px solid #232a3a; border-radius: 12px; background: #10141d; }
+  .panel > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: #7b8399; margin: 0; padding: 12px 16px; border-bottom: 1px solid #232a3a; }
+  .row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 8px;
+    border-bottom: 1px solid #1a2030;
+  }
+  .row:last-child { border-bottom: 0; }
+  .row.dragging { opacity: .4; }
+  .row.dropbefore { box-shadow: inset 0 2px 0 #4f8cff; }
+  .grip { cursor: grab; color: #4a536a; padding: 0 4px; user-select: none; }
+  .idx { width: 2.2em; text-align: right; color: #5c657c; font-variant-numeric: tabular-nums; }
+  .info { flex: 1; min-width: 0; }
+  .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { color: #6d768c; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .badge.bad { background: #2b1418; border: 1px solid #6b2f3a; color: #f0a0ad; }
+  .dur { color: #8b93a7; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rowbtns { display: flex; gap: 4px; }
+  .rowbtns button { padding: 3px 8px; font-size: 12px; }
+  .liblist, .schlist { max-height: 340px; overflow: auto; }
+  .librow { display: flex; align-items: center; gap: 10px; padding: 6px 16px; border-bottom: 1px solid #1a2030; }
+  .librow label { flex: 1; min-width: 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pathline { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #232a3a; }
+  .pathline input {
+    flex: 1; background: #0b0e15; color: #e8ecf3; border: 1px solid #333c4f;
+    border-radius: 8px; padding: 7px 10px; font-size: 13px;
+  }
+  .empty { padding: 18px 16px; color: #7b8399; }
+</style>
+<script src="/admin-core.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>StreamStation admin</h1>
+    <a href="/">&larr; player</a>
+    <span id="onair" class="onair"></span>
+  </header>
+
+  <div class="toolbar">
+    <button id="btn-random">Random shuffle</button>
+    <button id="btn-reset" title="Back to the deterministic order derived from shuffle_seed">Reset shuffle</button>
+    <button id="btn-rescan" class="ghost">Rescan library</button>
+    <span class="spacer"></span>
+    <span id="summary" class="muted"></span>
+  </div>
+  <div id="banner"></div>
+
+  <div class="panel">
+    <h2>Schedule <span id="schcount" class="muted"></span></h2>
+    <div id="schedule" class="schlist"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Add from library</h2>
+    <div class="librow">
+      <input id="filter" placeholder="filter&hellip;" style="flex:1;background:#0b0e15;color:#e8ecf3;border:1px solid #333c4f;border-radius:8px;padding:6px 10px;font-size:13px">
+      <button id="btn-addpicked">Add selected</button>
+    </div>
+    <div id="library" class="liblist"></div>
+    <div class="pathline">
+      <input id="abspath" placeholder="/absolute/path/to/video.mp4">
+      <button id="btn-addabs">Add path</button>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var Core = window.AdminCore;
+  var entries = [];
+  var library = [];
+  var dragIndex = null;
+  var lastUnreachable = [];
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmt(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(s).padStart(2, "0");
+  }
+
+  function api(path, method, body) {
+    var opts = { method: method || "GET" };
+    if (body) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (text) { throw new Error(path + " -> " + res.status + " " + text); });
+      }
+      return res.json();
+    });
+  }
+
+  function showBanner(text, kind) {
+    var banner = $("banner");
+    if (!text) { banner.style.display = "none"; banner.textContent = ""; return; }
+    banner.textContent = text;
+    banner.className = kind || "warn";
+  }
+
+  function outcomeBanner(outcome) {
+    if (!outcome) return;
+    var lines = [];
+    if (outcome.empty) {
+      lines.push("Schedule is EMPTY: the server will shut down (start it with --admin-only to edit safely).");
+    }
+    if (outcome.unreachable && outcome.unreachable.length) {
+      lines.push(outcome.unreachable.length + " unreachable file(s) - kept in the schedule, skipped at playback:");
+      lines.push(outcome.unreachable.slice(0, 5).join("\n"));
+    }
+    showBanner(lines.join("\n"), outcome.empty ? "error" : "warn");
+  }
+
+  function renderSchedule() {
+    var wrap = $("schedule");
+    wrap.innerHTML = "";
+    $("schcount").textContent = entries.length ? "(" + entries.length + ")" : "";
+
+    if (!entries.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "Nothing scheduled yet. Add videos from the library below.";
+      wrap.appendChild(empty);
+      renderSummary();
+      return;
+    }
+
+    entries.forEach(function (entry, i) {
+      var row = document.createElement("div");
+      row.className = "row";
+      row.draggable = true;
+
+      row.addEventListener("dragstart", function (ev) {
+        dragIndex = i;
+        row.classList.add("dragging");
+        ev.dataTransfer.effectAllowed = "move";
+      });
+      row.addEventListener("dragend", function () {
+        dragIndex = null;
+        row.classList.remove("dragging");
+      });
+      row.addEventListener("dragover", function (ev) {
+        if (dragIndex === null) return;
+        ev.preventDefault();
+        row.classList.add("dropbefore");
+      });
+      row.addEventListener("dragleave", function () { row.classList.remove("dropbefore"); });
+      row.addEventListener("drop", function (ev) {
+        ev.preventDefault();
+        row.classList.remove("dropbefore");
+        if (dragIndex === null || dragIndex === i) return;
+        entries = Core.moveEntry(entries, dragIndex, i);
+        save();
+      });
+
+      var grip = document.createElement("span");
+      grip.className = "grip";
+      grip.textContent = "\u2261";
+
+      var idx = document.createElement("span");
+      idx.className = "idx";
+      idx.textContent = (i + 1) + ".";
+
+      var info = document.createElement("div");
+      info.className = "info";
+      var name = document.createElement("div");
+      name.className = "name";
+      name.textContent = entry.title || entry.path;
+      var sub = document.createElement("div");
+      sub.className = "sub";
+      sub.textContent = entry.path;
+      info.appendChild(name);
+      info.appendChild(sub);
+
+      var badge = null;
+      if (!entry.reachable) {
+        badge = document.createElement("span");
+        badge.className = "badge bad";
+        badge.textContent = "unreachable";
+        badge.title = "File is missing or can't be read; it stays in the schedule but is skipped at playback";
+      }
+
+      var dur = document.createElement("span");
+      dur.className = "dur";
+      dur.textContent = entry.reachable ? fmt(entry.duration_secs) : "--:--";
+
+      var btns = document.createElement("div");
+      btns.className = "rowbtns";
+      var up = document.createElement("button");
+      up.textContent = "\u2191";
+      up.title = "Move up";
+      up.disabled = i === 0;
+      up.addEventListener("click", function () { entries = Core.moveEntry(entries, i, i - 1); save(); });
+      var down = document.createElement("button");
+      down.textContent = "\u2193";
+      down.title = "Move down";
+      down.disabled = i === entries.length - 1;
+      down.addEventListener("click", function () { entries = Core.moveEntry(entries, i, i + 1); save(); });
+      var del = document.createElement("button");
+      del.textContent = "\u2715";
+      del.title = "Remove from schedule (file stays on disk)";
+      del.className = "danger";
+      del.addEventListener("click", function () { entries = Core.removeEntry(entries, i); save(); });
+      btns.appendChild(up);
+      btns.appendChild(down);
+      btns.appendChild(del);
+
+      row.appendChild(grip);
+      row.appendChild(idx);
+      row.appendChild(info);
+      if (badge) row.appendChild(badge);
+      row.appendChild(dur);
+      row.appendChild(btns);
+      wrap.appendChild(row);
+    });
+    renderSummary();
+  }
+
+  function renderSummary() {
+    var total = entries.reduce(function (acc, e) { return acc + (e.reachable ? e.duration_secs : 0); }, 0);
+    $("summary").textContent = entries.length + " videos \u00b7 " + fmt(total) + " total";
+  }
+
+  function renderLibrary() {
+    var wrap = $("library");
+    wrap.innerHTML = "";
+    var filter = $("filter").value.trim().toLowerCase();
+    var candidates = library.filter(function (f) { return !f.in_schedule; });
+    if (filter) {
+      candidates = candidates.filter(function (f) {
+        return f.path.toLowerCase().indexOf(filter) !== -1;
+      });
+    }
+    if (!candidates.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = filter ? "No matches." : "All library files are already scheduled.";
+      wrap.appendChild(empty);
+      return;
+    }
+    candidates.forEach(function (file) {
+      var row = document.createElement("div");
+      row.className = "librow";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = file.path;
+      var label = document.createElement("label");
+      label.textContent = file.title + "  (" + fmt(file.duration_secs) + ")"
+        + "  \u2014 " + file.path;
+      label.title = file.path;
+      row.appendChild(box);
+      row.appendChild(label);
+      wrap.appendChild(row);
+    });
+  }
+
+  function reload(banner) {
+    Promise.all([api("/api/schedule"), api("/api/library")]).then(function (results) {
+      var view = results[0];
+      var lib = results[1];
+      entries = view.entries || [];
+      library = lib.files || [];
+      renderSchedule();
+      renderLibrary();
+      if (banner) outcomeBanner(banner);
+    }).catch(function (err) {
+      showBanner(String(err.message || err), "error");
+    });
+  }
+
+  function save() {
+    var paths = entries.map(function (e) { return e.path; });
+    api("/api/schedule", "PUT", { entries: paths }).then(function (outcome) {
+      lastUnreachable = outcome.unreachable || [];
+      reload(outcome);
+    }).catch(function (err) {
+      showBanner(String(err.message || err), "error");
+      reload();
+    });
+  }
+
+  $("btn-random").addEventListener("click", function () {
+    api("/api/schedule/shuffle", "POST", { mode: "random" }).then(function (outcome) {
+      reload(outcome);
+    }).catch(function (err) { showBanner(String(err.message || err), "error"); });
+  });
+
+  $("btn-reset").addEventListener("click", function () {
+    api("/api/schedule/shuffle", "POST", { mode: "reset" }).then(function (outcome) {
+      reload(outcome);
+    }).catch(function (err) { showBanner(String(err.message || err), "error"); });
+  });
+
+  $("btn-rescan").addEventListener("click", function () {
+    api("/api/rescan", "POST").then(function (outcome) {
+      reload(outcome);
+    }).catch(function (err) { showBanner(String(err.message || err), "error"); });
+  });
+
+  $("btn-addpicked").addEventListener("click", function () {
+    var picked = [];
+    document.querySelectorAll("#library input[type=checkbox]").forEach(function (box) {
+      if (!box.checked) return;
+      var match = library.filter(function (f) { return f.path === box.value; })[0];
+      if (match) picked.push({ path: match.path, title: match.title, duration_secs: match.duration_secs, reachable: true });
+    });
+    if (!picked.length) { showBanner("Nothing selected."); return; }
+    entries = Core.appendEntries(entries, picked);
+    save();
+  });
+
+  $("btn-addabs").addEventListener("click", function () {
+    var value = $("abspath").value.trim();
+    if (!value) return;
+    entries = Core.appendEntries(entries, [{ path: value, title: value.split("/").pop(), reachable: true }]);
+    $("abspath").value = "";
+    save();
+  });
+
+  $("filter").addEventListener("input", renderLibrary);
+
+  function refreshOnAir() {
+    api("/api/status").then(function (s) {
+      var text = s.admin_only
+        ? "ADMIN ONLY \u00b7 no playback"
+        : (s.playing ? "ON AIR: " + s.title : "off air (nobody watching)");
+      if (s.viewers) text += " \u00b7 " + s.viewers + " viewer(s)";
+      $("onair").textContent = text;
+    }).catch(function () {});
+  }
+
+  reload();
+  refreshOnAir();
+  setInterval(refreshOnAir, 5000);
+})();
+</script>
+</body>
+</html>

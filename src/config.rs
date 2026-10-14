@@ -15,6 +15,11 @@ pub struct Config {
     pub hls_time: u64,
     pub temp_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub schedule_path: PathBuf,
+    #[serde(skip)]
+    pub debug: bool,
+    #[serde(skip)]
+    pub admin_only: bool,
 }
 
 impl Default for Config {
@@ -29,6 +34,9 @@ impl Default for Config {
             hls_time: 2,
             temp_dir: std::env::temp_dir().join("streamstation"),
             cache_dir: default_cache_dir(),
+            schedule_path: default_schedule_path(),
+            debug: false,
+            admin_only: false,
         }
     }
 }
@@ -58,6 +66,7 @@ impl Config {
         cfg.path = expand_tilde(&cfg.path);
         cfg.temp_dir = expand_tilde(&cfg.temp_dir);
         cfg.cache_dir = expand_tilde(&cfg.cache_dir);
+        cfg.schedule_path = expand_tilde(&cfg.schedule_path);
         cfg.extensions = cfg
             .extensions
             .iter()
@@ -72,6 +81,10 @@ impl Config {
 
     pub fn addr(&self) -> String {
         format!("{}:{}", self.bind, self.port)
+    }
+
+    pub fn cache_file(&self) -> PathBuf {
+        self.cache_dir.join("movies.json")
     }
 }
 
@@ -104,6 +117,14 @@ fn default_config_path() -> PathBuf {
         })
         .join("streamstation")
         .join("config.toml")
+}
+
+fn default_schedule_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".streamstation")
+        .join("schedule.toml")
 }
 
 fn default_cache_dir() -> PathBuf {

@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::playlist::{Entry, Station};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -18,22 +18,27 @@ const FAIL_COOLDOWN: Duration = Duration::from_secs(5);
 
 pub struct StationRuntime {
     pub station: RwLock<Arc<Station>>,
+    /// Last directory scan (all library files with durations), used by /admin.
+    pub library: RwLock<Vec<(PathBuf, Duration)>>,
     pub presence: Presence,
     pub playing: AtomicBool,
     pub started: Instant,
     pub rescan_lock: tokio::sync::Mutex<()>,
+    pub shutdown: watch::Sender<bool>,
     pub cfg: Config,
     run_counter: AtomicU64,
 }
 
 impl StationRuntime {
-    pub fn new(station: Arc<Station>, cfg: Config) -> Self {
+    pub fn new(station: Arc<Station>, cfg: Config, shutdown: watch::Sender<bool>) -> Self {
         StationRuntime {
             station: RwLock::new(station),
+            library: RwLock::new(Vec::new()),
             presence: Presence::new(),
             playing: AtomicBool::new(false),
             started: Instant::now(),
             rescan_lock: tokio::sync::Mutex::new(()),
+            shutdown,
             cfg,
             run_counter: AtomicU64::new(0),
         }

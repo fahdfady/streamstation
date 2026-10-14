@@ -2,17 +2,19 @@ mod broadcaster;
 mod config;
 mod playlist;
 mod scan;
+mod schedule;
 mod web;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use config::Config;
 use playlist::{Station, deterministic_order};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -25,6 +27,13 @@ struct Cli {
     /// Path to config file (default: ~/.config/streamstation/config.toml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Verbose logging; also lists every unreachable file instead of just 5
+    #[arg(long, global = true)]
+    debug: bool,
+    /// Serve only /admin (no playback, no empty-schedule shutdown) so an
+    /// empty or broken schedule can be fixed while the server stays up
+    #[arg(long, global = true)]
+    admin_only: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -46,13 +55,16 @@ enum Command {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("streamstation=info,streamstation::ffmpeg=warn")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("streamstation=info,streamstation::ffmpeg=warn")
+            }),
         )
         .init();
 
     let cli = Cli::parse();
     let mut cfg = Config::load(cli.config.as_deref())?;
+    cfg.debug = cli.debug;
+    cfg.admin_only = cli.admin_only;
 
     match cli.command {
         Some(Command::Serve { port, bind }) => {
@@ -69,8 +81,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn ensure_ffmpeg() -> Result<()> {
-    for tool in ["ffmpeg", "ffprobe"] {
+async fn ensure_tools(admin_only: bool) -> Result<()> {
+    let mut tools = vec!["ffprobe"];
+    if !admin_only {
+        tools.push("ffmpeg");
+    }
+    for tool in tools {
         let ok = tokio::process::Command::new(tool)
             .arg("-version")
             .stdout(std::process::Stdio::null())
@@ -87,55 +103,85 @@ async fn ensure_ffmpeg() -> Result<()> {
 }
 
 async fn scan_cmd(cfg: Config) -> Result<()> {
-    let cache_path = cfg.cache_dir.join("movies.json");
-    let items = scan::scan(&cfg.path, &cfg.extensions, &cache_path).await?;
-    let ordered = deterministic_order(items, cfg.shuffle_seed);
-    let station = Station::new(ordered, SystemTime::now());
+    let items = scan::scan(&cfg.path, &cfg.extensions, &cfg.cache_file()).await?;
+    let by_path: HashMap<PathBuf, Duration> = items.iter().cloned().collect();
 
-    for (i, entry) in station.entries.iter().enumerate() {
-        println!(
-            "{:>4}. [{:>8}] {}  ({})",
-            i + 1,
-            fmt_duration(entry.duration),
-            entry.title,
-            entry.path.display()
-        );
+    let entries = match schedule::ScheduleFile::load(&cfg.schedule_path)? {
+        Some(sf) => sf.paths(),
+        None => deterministic_order(items, cfg.shuffle_seed)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect(),
+    };
+
+    let mut total = Duration::ZERO;
+    let mut playable = 0usize;
+    for (i, path) in entries.iter().enumerate() {
+        match by_path.get(path) {
+            Some(duration) => {
+                playable += 1;
+                total += *duration;
+                println!(
+                    "{:>4}. [{:>8}] {}  ({})",
+                    i + 1,
+                    fmt_duration(*duration),
+                    title_of(path),
+                    path.display()
+                );
+            }
+            None => println!(
+                "{:>4}. [ MISSING] {}  <-- unreachable, will be skipped",
+                i + 1,
+                path.display()
+            ),
+        }
     }
     println!(
-        "\n{} titles, {} of programming",
-        station.entries.len(),
-        fmt_duration(station.total)
+        "\n{} titles in schedule ({} playable), {} of programming",
+        entries.len(),
+        playable,
+        fmt_duration(total)
     );
     Ok(())
 }
 
 async fn serve(cfg: Config) -> Result<()> {
-    ensure_ffmpeg().await?;
+    ensure_tools(cfg.admin_only).await?;
     tokio::fs::create_dir_all(&cfg.temp_dir).await?;
     tokio::fs::create_dir_all(&cfg.cache_dir).await?;
-    broadcaster::clear_stream_dir(&cfg.temp_dir).await?;
-
-    let cache_path = cfg.cache_dir.join("movies.json");
-    info!("scanning {} ...", cfg.path.display());
-    let items = scan::scan(&cfg.path, &cfg.extensions, &cache_path).await?;
-    if items.is_empty() {
-        warn!(
-            "no playable videos found in {} - check the path and file extensions",
-            cfg.path.display()
-        );
+    if !cfg.admin_only {
+        broadcaster::clear_stream_dir(&cfg.temp_dir).await?;
     }
 
-    let ordered = deterministic_order(items, cfg.shuffle_seed);
-    let station = Station::new(ordered, SystemTime::now());
-    info!(
-        "station built: {} titles, {:.1} hours of programming",
-        station.entries.len(),
-        station.total.as_secs_f64() / 3600.0
-    );
-
-    let rt = Arc::new(broadcaster::StationRuntime::new(Arc::new(station), cfg.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let supervisor = tokio::spawn(broadcaster::supervise(rt.clone(), shutdown_rx));
+    let placeholder = Station::new(Vec::new(), SystemTime::now());
+    let rt = Arc::new(broadcaster::StationRuntime::new(
+        Arc::new(placeholder),
+        cfg.clone(),
+        shutdown_tx,
+    ));
+
+    let supervisor = if cfg.admin_only {
+        info!("admin-only mode: playback disabled, fix the schedule via /admin");
+        None
+    } else {
+        Some(tokio::spawn(broadcaster::supervise(
+            rt.clone(),
+            shutdown_rx,
+        )))
+    };
+
+    info!("loading schedule {} ...", cfg.schedule_path.display());
+    let outcome = schedule::refresh(&rt).await?;
+    if outcome.empty && !cfg.admin_only {
+        schedule::fatal_empty_schedule(&rt, &outcome.unreachable).await;
+    }
+    info!(
+        "station ready: {} playable, {} unreachable (skipped), {:.1} hours of programming",
+        outcome.files,
+        outcome.unreachable.len(),
+        outcome.total_secs / 3600.0
+    );
 
     let listener = tokio::net::TcpListener::bind(cfg.addr())
         .await
@@ -146,7 +192,7 @@ async fn serve(cfg: Config) -> Result<()> {
     } else {
         local.to_string()
     };
-    info!("StreamStation is on air: http://{display_addr}/");
+    info!("StreamStation is on air: http://{display_addr}/ (admin: /admin)");
     info!("nobody watching? ffmpeg is asleep - position is just a clock");
 
     axum::serve(listener, web::router(rt.clone()))
@@ -154,8 +200,10 @@ async fn serve(cfg: Config) -> Result<()> {
         .await?;
 
     info!("shutting down");
-    let _ = shutdown_tx.send(true);
-    let _ = supervisor.await;
+    let _ = rt.shutdown.send(true);
+    if let Some(supervisor) = supervisor {
+        let _ = supervisor.await;
+    }
     Ok(())
 }
 
@@ -175,6 +223,12 @@ async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+}
+
+fn title_of(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn fmt_duration(duration: Duration) -> String {

@@ -1,5 +1,51 @@
 # TODO
 
+## Subtitle support
+
+Show a subtitle picker on `/` only when the movie actually has sidecar subtitle
+files next to it.
+
+- **Detection**: during `scan.rs` probing, look for files sharing the movie's
+  stem in the same directory with subtitle extensions (`.srt .ass .ssa .vtt
+  .sub`), including language suffixes (`Movie.en.srt`, `Movie.ara.srt`). Store
+  the list in the duration cache entry and expose it via `/api/status`.
+- **Delivery (primary)**: mux a WebVTT track into the HLS stream by adding
+  `-c:s webvtt` (and mapping only the selected track) to the ffmpeg command, so
+  hls.js exposes native subtitle track selection. The chosen track lives in the
+  station state so all viewers get it (or make it per-client later).
+- **Delivery (fallback)**: serve converted WebVTT from the server
+  (`GET /subtitles/{index}.vtt`, convert SRT -> VTT on the fly or via ffmpeg)
+  and attach with a `<video><track>` element client-side.
+- Burn-in via `-vf subtitles=...` is an option if track muxing proves flaky,
+  but then subtitles can't be toggled per viewer.
+
+## Seek / timeline control from /admin
+
+Move the station's playhead through the current movie like VLC would, from the
+admin page.
+
+- `POST /api/seek { index?, offset_secs }` plus "previous / next" buttons.
+- Implementation: the supervisor kills ffmpeg and respawns it with a new `-ss`
+  (same machinery as skipping an unreachable movie). All viewers jump together;
+  the browser re-attaches on the next `/api/status` poll.
+- Decide the semantics: **ephemeral** (playback diverges from the wall-clock
+  schedule until the next movie boundary) vs **re-anchor** (shift the stored
+  `epoch` by the delta so the grid follows the seek). Ephemeral is simpler;
+  re-anchoring keeps `(now - epoch) % total` honest.
+- Also useful: jump-to-title (seek to `index` at offset 0).
+
+## File health ping in /admin
+
+Right now reachability comes from a cheap existence + duration-cache check
+during reconciliation. Add an explicit deep check:
+
+- When the admin page opens (or via a "Verify all" button), `ffprobe` every
+  scheduled file on demand and show a **corrupted** badge beside bad ones -
+  distinct from "missing" - with the ffprobe error in the tooltip.
+- Cache results per file (mtime+size) so repeat visits don't re-probe the whole
+  library; run probes with bounded concurrency like `scan.rs` does.
+- Consider a per-row "ping" button for single-file re-checks.
+
 ## Multi-channel (deferred)
 
 v1 ships a single station rooted at one directory (`path` in the config). The goal
@@ -12,7 +58,8 @@ What needs to change when we do it:
   array, each entry `{ name, path, extensions?, shuffle_seed? }`.
 - **Runtime**: one `StationRuntime` per channel in a `HashMap<String, Arc<StationRuntime>>`
   held by the app state. Each channel keeps its own `Station`, `Presence` set,
-  supervisor task, and temp dir (`/tmp/streamstation/<channel>/`).
+  supervisor task, temp dir (`/tmp/streamstation/<channel>/`) and
+  `schedule.toml`.
 - **Supervisor**: spawn one `supervise()` task per channel; idle channels stay
   asleep exactly like the single channel does today.
 - **Routes**: prefix everything with the channel:
@@ -25,8 +72,7 @@ What needs to change when we do it:
 - **HLS temp dirs**: per-channel subdirectory; segment names already include a
   per-run id, so keep that scheme and add the channel dir on top.
 - **Scan cache**: one cache file per channel (`~/.cache/streamstation/<channel>.json`).
-- **UI**: channel switcher (tabs or a select) that re-points `/hls/...` and
-  re-attaches hls.js on change; persist the choice in the URL hash.
+- **Admin**: channel switcher on `/admin`; one schedule file per channel.
 
 ## Nice-to-haves
 
@@ -35,11 +81,13 @@ What needs to change when we do it:
   for AVI/MKV/etc. Needs recording `codec_name`/`pix_fmt` during `scan.rs`
   probing (extend the cache entry).
 - **Hardware acceleration**: `h264_nvenc` / `h264_vaapi` / `h264_videotoolbox`
-  selected by a config option, with `libx264` as the fallback.
+  selected by a config option, with `libx264` as the fallback. (This machine
+  has an RTX 3050 + Intel iGPU, both verified working with ffmpeg.)
 - **Schedule view in the UI**: upcoming titles derived from `position_at()`,
   so you can see what's "on" later tonight.
-- **Persistent epoch**: store the station epoch in a small state file so a
-  server restart doesn't reset the program grid (currently `epoch = start time`).
-- **Admin page**: list channels/files, trigger rescan, show viewer counts.
 - **Idle kill polish**: make the grace period configurable per channel and
   expose "stream stops in Ns if nobody tunes in" in the status API.
+- **LAN / offline playback**: multi-viewer over LAN already works via
+  `--bind 0.0.0.0`; the player still loads hls.js from a CDN, so TV/phone
+  clients without internet can't initialize. Vendoring hls.js locally would
+  make the station fully offline.
