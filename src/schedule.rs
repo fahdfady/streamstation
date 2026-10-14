@@ -14,6 +14,9 @@ use tracing::{info, warn};
 pub struct ScheduleFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch_unix: Option<u64>,
+    /// Present while the station is paused; the instant the playhead froze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at_unix: Option<u64>,
     #[serde(default)]
     pub entries: Vec<EntryLine>,
 }
@@ -192,9 +195,12 @@ pub async fn seek(rt: &Arc<StationRuntime>, index: usize, offset_secs: f64) -> R
     let target = entry.start + offset;
     let title = entry.title.clone();
 
-    let new_epoch = reanchored_epoch(target, SystemTime::now());
+    // While paused the playhead is frozen, so anchor the seek to the pause instant.
+    let anchor = station.paused_at.unwrap_or_else(SystemTime::now);
+    let new_epoch = reanchored_epoch(target, anchor);
     let mut schedule = ScheduleFile::load(&cfg.schedule_path)?.unwrap_or_default();
     schedule.epoch_unix = Some(time_to_unix(new_epoch));
+    schedule.paused_at_unix = station.paused_at.map(time_to_unix);
     schedule.save(&cfg.schedule_path)?;
 
     let entries: Vec<(PathBuf, Duration)> = station
@@ -202,7 +208,7 @@ pub async fn seek(rt: &Arc<StationRuntime>, index: usize, offset_secs: f64) -> R
         .iter()
         .map(|e| (e.path.clone(), e.duration))
         .collect();
-    rt.swap_station(Arc::new(Station::new(entries, new_epoch)))
+    rt.swap_station(Arc::new(Station::new_with(entries, new_epoch, station.paused_at)))
         .await;
 
     info!(
@@ -221,6 +227,74 @@ fn reanchored_epoch(target: Duration, now: SystemTime) -> SystemTime {
     now.checked_sub(target).unwrap_or(UNIX_EPOCH)
 }
 
+/// Where the playhead sat when the station was paused.
+fn frozen_elapsed(epoch: SystemTime, paused_at: SystemTime, total: Duration) -> Duration {
+    if total.is_zero() {
+        return Duration::ZERO;
+    }
+    let elapsed = paused_at.duration_since(epoch).unwrap_or(Duration::ZERO);
+    Duration::from_nanos((elapsed.as_nanos() % total.as_nanos()) as u64)
+}
+
+/// Resuming re-anchors the epoch so playback continues from the frozen position
+/// instead of jumping forward by however long the pause lasted.
+fn resume_epoch(
+    epoch: SystemTime,
+    paused_at: SystemTime,
+    now: SystemTime,
+    total: Duration,
+) -> SystemTime {
+    now.checked_sub(frozen_elapsed(epoch, paused_at, total))
+        .unwrap_or(UNIX_EPOCH)
+}
+
+#[derive(Serialize)]
+pub struct PauseOutcome {
+    pub paused: bool,
+    pub index: Option<usize>,
+    pub offset_secs: f64,
+    pub title: Option<String>,
+}
+
+/// Pause or resume the whole station. Paused freezes the playhead (persisted in
+/// schedule.toml, so it survives restarts); resuming continues from where it froze.
+pub async fn set_paused(rt: &Arc<StationRuntime>, paused: bool) -> Result<PauseOutcome> {
+    let _guard = rt.rescan_lock.lock().await;
+    let cfg = &rt.cfg;
+    let mut schedule = ScheduleFile::load(&cfg.schedule_path)?.unwrap_or_default();
+    let now = SystemTime::now();
+
+    if paused {
+        if schedule.paused_at_unix.is_none() {
+            schedule.paused_at_unix = Some(time_to_unix(now));
+            info!("station paused");
+        }
+    } else if let Some(paused_at) = schedule.paused_at_unix.map(unix_to_time) {
+        let epoch = schedule.epoch_unix.map(unix_to_time).unwrap_or(paused_at);
+        let total = rt.station.read().await.total;
+        schedule.epoch_unix = Some(time_to_unix(resume_epoch(epoch, paused_at, now, total)));
+        schedule.paused_at_unix = None;
+        info!("station resumed");
+    }
+    schedule.save(&cfg.schedule_path)?;
+    apply_locked(rt, schedule.paths()).await?;
+
+    let station = rt.station.read().await.clone();
+    let (index, offset_secs, title) = match station.position_at(now) {
+        Some(pb) => {
+            let entry = &station.entries[pb.index];
+            (Some(pb.index), pb.offset.as_secs_f64(), Some(entry.title.clone()))
+        }
+        None => (None, 0.0, None),
+    };
+    Ok(PauseOutcome {
+        paused: station.is_paused(),
+        index,
+        offset_secs,
+        title,
+    })
+}
+
 async fn apply_locked(rt: &Arc<StationRuntime>, entries: Vec<PathBuf>) -> Result<ApplyOutcome> {
     let cfg = &rt.cfg;
     let mut schedule = ScheduleFile::load(&cfg.schedule_path)?.unwrap_or_default();
@@ -228,11 +302,12 @@ async fn apply_locked(rt: &Arc<StationRuntime>, entries: Vec<PathBuf>) -> Result
         .epoch_unix
         .map(unix_to_time)
         .unwrap_or_else(SystemTime::now);
+    let paused_at = schedule.paused_at_unix.map(unix_to_time);
 
     let durations = scan::durations_for(entries.clone(), &cfg.cache_file()).await;
     let (playable, unreachable) = reconcile(entries.clone(), durations);
 
-    let station = Station::new(playable, epoch);
+    let station = Station::new_with(playable, epoch, paused_at);
     let outcome = ApplyOutcome {
         files: station.entries.len(),
         total_secs: station.total.as_secs_f64(),
@@ -241,6 +316,7 @@ async fn apply_locked(rt: &Arc<StationRuntime>, entries: Vec<PathBuf>) -> Result
     };
 
     schedule.epoch_unix = Some(time_to_unix(epoch));
+    schedule.paused_at_unix = paused_at.map(time_to_unix);
     schedule.entries = entries.into_iter().map(|path| EntryLine { path }).collect();
     schedule.save(&cfg.schedule_path)?;
     rt.swap_station(Arc::new(station)).await;
@@ -353,6 +429,7 @@ mod tests {
         let path = temp_file("schedule.toml");
         let schedule = ScheduleFile {
             epoch_unix: Some(1_700_000_000),
+            paused_at_unix: Some(1_700_000_100),
             entries: vec![
                 EntryLine {
                     path: PathBuf::from("/a/b.mp4"),
@@ -365,6 +442,7 @@ mod tests {
         schedule.save(&path).unwrap();
         let loaded = ScheduleFile::load(&path).unwrap().unwrap();
         assert_eq!(loaded.epoch_unix, Some(1_700_000_000));
+        assert_eq!(loaded.paused_at_unix, Some(1_700_000_100));
         assert_eq!(loaded.paths(), vec![
             PathBuf::from("/a/b.mp4"),
             PathBuf::from("/c/d.mp4")
@@ -431,6 +509,37 @@ mod tests {
             .unwrap();
         assert_eq!(pb.index, 1);
         assert_eq!(pb.offset, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn resume_continues_from_frozen_position() {
+        let items = vec![
+            (PathBuf::from("/a.mp4"), Duration::from_secs(100)),
+            (PathBuf::from("/b.mp4"), Duration::from_secs(50)),
+        ];
+        let epoch = SystemTime::UNIX_EPOCH;
+        let station = Station::new(items, epoch);
+
+        // Paused 30s in, resumed an hour later: playback continues at 30s.
+        let paused_at = UNIX_EPOCH + Duration::from_secs(30);
+        let now = UNIX_EPOCH + Duration::from_secs(3600);
+        assert_eq!(
+            frozen_elapsed(epoch, paused_at, station.total),
+            Duration::from_secs(30)
+        );
+
+        let new_epoch = resume_epoch(epoch, paused_at, now, station.total);
+        let resumed = Station::new(
+            station
+                .entries
+                .iter()
+                .map(|e| (e.path.clone(), e.duration))
+                .collect(),
+            new_epoch,
+        );
+        let pb = resumed.position_at(now).unwrap();
+        assert_eq!(pb.index, 0);
+        assert_eq!(pb.offset, Duration::from_secs(30));
     }
 
     #[test]

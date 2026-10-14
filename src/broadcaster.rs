@@ -158,12 +158,9 @@ pub async fn supervise(rt: Arc<StationRuntime>, mut shutdown: watch::Receiver<bo
             }
         } else {
             idle_since = None;
+            let paused = station.is_paused();
             match position {
-                None => {
-                    kill(&mut active).await;
-                    rt.playing.store(false, Ordering::Relaxed);
-                }
-                Some(pb) => {
+                Some(pb) if !paused => {
                     let generation = rt.generation();
                     let needs_restart = active
                         .as_ref()
@@ -199,6 +196,11 @@ pub async fn supervise(rt: Arc<StationRuntime>, mut shutdown: watch::Receiver<bo
                             }
                         }
                     }
+                }
+                _ => {
+                    // Paused, or nothing playable: make sure we are off air.
+                    kill(&mut active).await;
+                    rt.playing.store(false, Ordering::Relaxed);
                 }
             }
         }

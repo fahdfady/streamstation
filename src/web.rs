@@ -25,6 +25,7 @@ pub fn router(rt: Arc<StationRuntime>) -> Router {
         .route("/api/schedule", get(schedule_get).put(schedule_put))
         .route("/api/schedule/shuffle", post(schedule_shuffle))
         .route("/api/seek", post(seek))
+        .route("/api/pause", post(pause))
         .route("/api/library", get(library))
         .route("/hls/index.m3u8", get(playlist))
         .route("/hls/{name}", get(segment))
@@ -54,6 +55,7 @@ async fn admin_core() -> Response {
 #[derive(Serialize)]
 struct StatusResponse {
     playing: bool,
+    paused: bool,
     admin_only: bool,
     /// Bumped whenever the station is swapped (seek / schedule edit); players
     /// re-attach when it changes.
@@ -91,6 +93,7 @@ async fn status(State(rt): State<Arc<StationRuntime>>) -> Json<StatusResponse> {
 
     Json(StatusResponse {
         playing: rt.is_playing(),
+        paused: station.is_paused(),
         admin_only: rt.cfg.admin_only,
         seq: rt.generation(),
         viewers: rt.presence.count(),
@@ -201,6 +204,18 @@ async fn seek(
         }
     };
     Ok(Json(schedule::seek(&rt, index, req.offset_secs).await?))
+}
+
+#[derive(Deserialize)]
+struct PauseRequest {
+    paused: bool,
+}
+
+async fn pause(
+    State(rt): State<Arc<StationRuntime>>,
+    Json(req): Json<PauseRequest>,
+) -> Result<Json<schedule::PauseOutcome>, ApiError> {
+    Ok(Json(schedule::set_paused(&rt, req.paused).await?))
 }
 
 #[derive(Serialize)]

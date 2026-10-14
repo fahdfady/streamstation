@@ -196,6 +196,8 @@
       var live = document.getElementById("live");
       if (s.admin_only) {
         live.textContent = "admin only";
+      } else if (s.paused) {
+        live.textContent = "paused";
       } else {
         live.textContent = s.playing ? "on air" : (s.viewers > 0 ? "tuning" : "off air");
       }

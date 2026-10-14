@@ -20,10 +20,20 @@ pub struct Station {
     pub epoch: SystemTime,
     pub entries: Vec<Entry>,
     pub total: Duration,
+    /// When set, the station is paused and its playhead is frozen at this instant.
+    pub paused_at: Option<SystemTime>,
 }
 
 impl Station {
     pub fn new(items: Vec<(PathBuf, Duration)>, epoch: SystemTime) -> Self {
+        Station::new_with(items, epoch, None)
+    }
+
+    pub fn new_with(
+        items: Vec<(PathBuf, Duration)>,
+        epoch: SystemTime,
+        paused_at: Option<SystemTime>,
+    ) -> Self {
         let mut entries = Vec::with_capacity(items.len());
         let mut acc = Duration::ZERO;
         for (path, duration) in items {
@@ -43,6 +53,7 @@ impl Station {
             epoch,
             entries,
             total: acc,
+            paused_at,
         }
     }
 
@@ -50,12 +61,18 @@ impl Station {
         self.entries.is_empty() || self.total.is_zero()
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
     /// The heart of the station: playback position is pure arithmetic on wall-clock
-    /// time. No decoding happens until somebody actually watches.
+    /// time. No decoding happens until somebody actually watches. While paused the
+    /// clock is effectively frozen at `paused_at`.
     pub fn position_at(&self, now: SystemTime) -> Option<Playback> {
         if self.is_empty() {
             return None;
         }
+        let now = self.paused_at.unwrap_or(now);
         let elapsed = now.duration_since(self.epoch).unwrap_or(Duration::ZERO);
         let pos = Duration::from_nanos((elapsed.as_nanos() % self.total.as_nanos()) as u64);
         let idx = self
@@ -162,6 +179,28 @@ mod tests {
             .unwrap();
         assert_eq!(pb.index, 0);
         assert_eq!(pb.offset, Duration::ZERO);
+    }
+
+    #[test]
+    fn pause_freezes_the_playhead() {
+        let items = vec![
+            (PathBuf::from("/a.mp4"), Duration::from_secs(10)),
+            (PathBuf::from("/b.mp4"), Duration::from_secs(20)),
+        ];
+        let paused_at = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+        let station = Station::new_with(items, SystemTime::UNIX_EPOCH, Some(paused_at));
+
+        let pb = station.position_at(paused_at).unwrap();
+        assert_eq!(pb.index, 0);
+        assert_eq!(pb.offset, Duration::from_secs(5));
+
+        // Long after the pause, the position must not have advanced.
+        let pb = station
+            .position_at(SystemTime::UNIX_EPOCH + Duration::from_secs(1000))
+            .unwrap();
+        assert_eq!(pb.index, 0);
+        assert_eq!(pb.offset, Duration::from_secs(5));
+        assert!(station.is_paused());
     }
 
     #[test]

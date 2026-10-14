@@ -88,6 +88,7 @@
     <div class="seekbox">
       <div id="nowtitle" class="name">&mdash;</div>
       <div class="seekline">
+        <button id="btn-pause" title="Pause the whole station (freezes the playhead)">Pause</button>
         <button id="btn-prev" title="Previous title">&laquo;</button>
         <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
         <button id="btn-next" title="Next title">&raquo;</button>
@@ -406,9 +407,10 @@
   function refreshOnAir() {
     api("/api/status").then(function (s) {
       lastStatus = s;
-      var text = s.admin_only
-        ? "ADMIN ONLY \u00b7 no playback"
-        : (s.playing ? "ON AIR: " + s.title : "off air (nobody watching)");
+      var text;
+      if (s.admin_only) text = "ADMIN ONLY \u00b7 no playback";
+      else if (s.paused) text = "PAUSED";
+      else text = s.playing ? "ON AIR: " + s.title : "off air (nobody watching)";
       if (s.viewers) text += " \u00b7 " + s.viewers + " viewer(s)";
       $("onair").textContent = text;
 
@@ -422,6 +424,8 @@
       $("btn-prev").disabled = !seekable;
       $("btn-next").disabled = !seekable;
       $("scrub").disabled = !seekable;
+      $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
+      $("btn-pause").disabled = s.admin_only || s.count === 0;
     }).catch(function () {});
   }
 
@@ -439,6 +443,16 @@
     scrubbing = false;
     if (!lastStatus || lastStatus.index === null) return;
     seek(lastStatus.index, AdminCore.offsetFromFraction(lastStatus.duration_secs, scrubFraction()));
+  });
+
+  $("btn-pause").addEventListener("click", function () {
+    if (!lastStatus) return;
+    api("/api/pause", "POST", { paused: !lastStatus.paused }).then(function (outcome) {
+      showBanner(outcome.paused ? "Station paused" : "Station resumed", "info");
+      refreshOnAir();
+    }).catch(function (err) {
+      showBanner(String(err.message || err), "error");
+    });
   });
 
   $("btn-prev").addEventListener("click", function () {
