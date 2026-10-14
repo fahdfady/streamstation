@@ -237,7 +237,7 @@ async fn spawn_ffmpeg(cfg: &Config, entry: &Entry, offset: Duration, run_id: u64
         .arg("-hls_time")
         .arg(cfg.hls_time.to_string())
         .args(["-hls_list_size", "6"])
-        .args(["-hls_flags", "delete_segments"])
+        .args(["-hls_flags", "delete_segments+temp_file"])
         .arg("-hls_segment_filename")
         .arg(&segment)
         .arg(&playlist)
