@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamStation</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1c2230, #0b0d12 60%);
+    color: #e8ecf3; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { width: min(960px, 94vw); padding: 32px 0; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: .4px; margin: 0; }
+  .pill {
+    margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+    padding: 4px 10px; border-radius: 999px; border: 1px solid #3a4152; color: #8b93a7;
+  }
+  .pill.on { color: #6ee7a0; border-color: #2f6b47; background: #12271a; }
+  .player { position: relative; border-radius: 14px; overflow: hidden; background: #000; aspect-ratio: 16/9; }
+  video { width: 100%; height: 100%; display: block; background: #000; }
+  #overlay {
+    position: absolute; inset: 0; width: 100%; border: 0; cursor: pointer;
+    background: rgba(0,0,0,.55); color: #fff; font-size: 17px;
+  }
+  .now { margin-top: 18px; }
+  .label { font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: #7b8399; }
+  .title { font-size: 20px; font-weight: 600; margin: 4px 0 10px; }
+  .bar { height: 4px; border-radius: 999px; background: #232838; overflow: hidden; }
+  #progress { height: 100%; width: 0; background: linear-gradient(90deg, #4f8cff, #6ee7a0); }
+  .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: #8b93a7; font-variant-numeric: tabular-nums; }
+  .meta #next { text-align: right; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>StreamStation</h1>
+    <span id="live" class="pill">off air</span>
+  </header>
+  <div class="player">
+    <video id="video" controls playsinline></video>
+    <button id="overlay" hidden>&#9654; Tap to watch</button>
+  </div>
+  <section class="now">
+    <div class="label">Now playing</div>
+    <div id="title" class="title">&mdash;</div>
+    <div class="bar"><div id="progress"></div></div>
+    <div class="meta">
+      <span id="offset">--:--</span>
+      <span id="next"></span>
+    </div>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var session = (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+
+  var video = document.getElementById("video");
+  var overlay = document.getElementById("overlay");
+  var hls = null;
+  var attachedIndex = null;
+  var reattachTimer = null;
+  var lastMediaTime = -1;
+  var lastMediaProgressAt = performance.now();
+
+  function fmt(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    var mm = (h ? String(m).padStart(2, "0") : String(m));
+    return (h ? h + ":" : "") + mm + ":" + String(s).padStart(2, "0");
+  }
+
+  function api(path, body) {
+    var opts = body
+      ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      : {};
+    return fetch(path, opts).then(function (res) {
+      if (!res.ok) throw new Error(path + " -> " + res.status);
+      return res.json();
+    });
+  }
+
+  // Heartbeat from a Worker: background tabs throttle page timers, workers are not.
+  try {
+    var workerSrc =
+      "var session = " + JSON.stringify(session) + ";" +
+      "function hb() {" +
+      "  fetch(new URL('/api/heartbeat', self.location.origin).href, {" +
+      "    method: 'POST', headers: {'Content-Type': 'application/json'}," +
+      "    body: JSON.stringify({session: session})" +
+      "  }).catch(function () {});" +
+      "}" +
+      "setInterval(hb, 5000); hb();";
+    new Worker(URL.createObjectURL(new Blob([workerSrc], { type: "text/javascript" })));
+  } catch (e) {
+    setInterval(function () { api("/api/heartbeat", { session: session }).catch(function () {}); }, 3000);
+  }
+
+  window.addEventListener("pagehide", function () {
+    try {
+      navigator.sendBeacon(
+        "/api/leave",
+        new Blob([JSON.stringify({ session: session })], { type: "application/json" })
+      );
+    } catch (e) {}
+  });
+
+  function destroy() {
+    if (hls) { hls.destroy(); hls = null; }
+    attachedIndex = null;
+  }
+
+  function scheduleReattach() {
+    if (reattachTimer) return;
+    reattachTimer = setTimeout(function () {
+      reattachTimer = null;
+      destroy();
+      refresh();
+    }, 3000);
+  }
+
+  function attach() {
+    destroy();
+    var url = "/hls/index.m3u8";
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({
+        manifestLoadingMaxRetry: 30,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingMaxRetry: 30,
+        fragLoadingMaxRetry: 30,
+        backBufferLength: 30
+      });
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, function (_, data) {
+        if (data.fatal) scheduleReattach();
+      });
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = url;
+      video.addEventListener("error", scheduleReattach, { once: true });
+    }
+    video.play().then(function () {
+      overlay.hidden = true;
+    }).catch(function () {
+      overlay.hidden = false;
+    });
+  }
+
+  overlay.addEventListener("click", function () {
+    video.play().then(function () { overlay.hidden = true; }).catch(function () {});
+  });
+
+  video.addEventListener("timeupdate", function () {
+    if (video.currentTime !== lastMediaTime) {
+      lastMediaTime = video.currentTime;
+      lastMediaProgressAt = performance.now();
+    }
+  });
+
+  function watchdog() {
+    if (attachedIndex === null) return;
+    if (video.paused) return;
+    if (performance.now() - lastMediaProgressAt > 20000) {
+      lastMediaProgressAt = performance.now();
+      scheduleReattach();
+    }
+  }
+
+  function refresh() {
+    api("/api/status").then(function (s) {
+      document.getElementById("title").textContent = s.title;
+      document.getElementById("next").textContent = s.next_title ? "Next: " + s.next_title : "";
+      document.getElementById("offset").textContent = fmt(s.offset_secs) + " / " + fmt(s.duration_secs);
+      document.getElementById("progress").style.width =
+        (s.duration_secs ? Math.min(100, 100 * s.offset_secs / s.duration_secs) : 0) + "%";
+
+      var live = document.getElementById("live");
+      live.textContent = s.playing ? "on air" : (s.viewers > 0 ? "tuning" : "off air");
+      live.className = "pill" + (s.playing ? " on" : "");
+
+      if (!s.playing) {
+        destroy();
+      } else if (attachedIndex !== s.index) {
+        attachedIndex = s.index;
+        attach();
+      }
+      watchdog();
+    }).catch(function () {});
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh();
+  });
+
+  setInterval(refresh, 3000);
+  refresh();
+})();
+</script>
+</body>
+</html>
