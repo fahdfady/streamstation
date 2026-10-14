@@ -18,6 +18,7 @@ const code = extractInlineScript(readFileSync(join(root, "web", "index.html"), "
 
 let status = {
   playing: true,
+  seq: 0,
   viewers: 1,
   count: 2,
   index: 0,
@@ -124,6 +125,12 @@ async function main() {
   check(hlsInstances === 2, `movie boundary attaches the next stream (got ${hlsInstances})`);
   await tick();
   check(hlsInstances === 2, `boundary attach happens exactly once (got ${hlsInstances})`);
+
+  status = { ...status, seq: 1, offset_secs: 3 };
+  await tick();
+  check(hlsInstances === 3, `seek (same movie, new seq) re-attaches (got ${hlsInstances})`);
+  await tick();
+  check(hlsInstances === 3, `seek re-attaches exactly once (got ${hlsInstances})`);
 
   process.exitCode = failures > 0 ? 1 : 0;
 }

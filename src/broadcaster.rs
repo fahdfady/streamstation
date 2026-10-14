@@ -27,6 +27,7 @@ pub struct StationRuntime {
     pub shutdown: watch::Sender<bool>,
     pub cfg: Config,
     run_counter: AtomicU64,
+    generation: AtomicU64,
 }
 
 impl StationRuntime {
@@ -41,6 +42,7 @@ impl StationRuntime {
             shutdown,
             cfg,
             run_counter: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -48,8 +50,16 @@ impl StationRuntime {
         self.playing.load(Ordering::Relaxed)
     }
 
+    /// Bumped on every station swap (seek, schedule edit). Clients and the
+    /// supervisor use it to detect that the stream must be re-established even
+    /// when the movie index itself did not change.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
     pub async fn swap_station(&self, station: Arc<Station>) {
         *self.station.write().await = station;
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     fn next_run_id(&self) -> u64 {
@@ -98,6 +108,7 @@ struct Active {
     index: usize,
     base_offset: Duration,
     started: Instant,
+    generation: u64,
 }
 
 pub async fn supervise(rt: Arc<StationRuntime>, mut shutdown: watch::Receiver<bool>) {
@@ -153,9 +164,10 @@ pub async fn supervise(rt: Arc<StationRuntime>, mut shutdown: watch::Receiver<bo
                     rt.playing.store(false, Ordering::Relaxed);
                 }
                 Some(pb) => {
+                    let generation = rt.generation();
                     let needs_restart = active
                         .as_ref()
-                        .map(|a| a.index != pb.index)
+                        .map(|a| a.index != pb.index || a.generation != generation)
                         .unwrap_or(true);
                     let cooling = cooldown_until.map(|t| Instant::now() < t).unwrap_or(false);
                     if needs_restart && !cooling {
@@ -177,6 +189,7 @@ pub async fn supervise(rt: Arc<StationRuntime>, mut shutdown: watch::Receiver<bo
                                     index: pb.index,
                                     base_offset: pb.offset,
                                     started: Instant::now(),
+                                    generation,
                                 });
                                 rt.playing.store(true, Ordering::Relaxed);
                             }

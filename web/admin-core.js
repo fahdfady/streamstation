@@ -30,9 +30,19 @@
     return list.concat(added);
   }
 
+  // Scrubber: fraction (0..1) -> seconds into the movie, clamped.
+  function offsetFromFraction(durationSecs, fraction) {
+    if (!isFinite(durationSecs) || durationSecs <= 0) return 0;
+    var f = isFinite(fraction) ? fraction : 0;
+    if (f < 0) f = 0;
+    if (f > 1) f = 1;
+    return durationSecs * f;
+  }
+
   global.AdminCore = {
     moveEntry: moveEntry,
     removeEntry: removeEntry,
-    appendEntries: appendEntries
+    appendEntries: appendEntries,
+    offsetFromFraction: offsetFromFraction
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -31,6 +31,10 @@
   #banner { display: none; margin: 10px 0; padding: 10px 14px; border-radius: 10px; font-size: 13px; white-space: pre-line; }
   #banner.warn { display: block; background: #2b2410; border: 1px solid #6b5a1e; color: #e8d48a; }
   #banner.error { display: block; background: #2b1418; border: 1px solid #6b2f3a; color: #f0a0ad; }
+  #banner.info { display: block; background: #101a2b; border: 1px solid #2a4a6b; color: #9fc4e8; }
+  .seekbox { padding: 12px 16px; }
+  .seekline { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .seekline input[type=range] { flex: 1; accent-color: #4f8cff; }
   .panel { margin-top: 18px; border: 1px solid #232a3a; border-radius: 12px; background: #10141d; }
   .panel > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: #7b8399; margin: 0; padding: 12px 16px; border-bottom: 1px solid #232a3a; }
   .row {
@@ -80,6 +84,19 @@
   <div id="banner"></div>
 
   <div class="panel">
+    <h2>On air <span class="muted">(seek the station like a VLC scrubber)</span></h2>
+    <div class="seekbox">
+      <div id="nowtitle" class="name">&mdash;</div>
+      <div class="seekline">
+        <button id="btn-prev" title="Previous title">&laquo;</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
+        <button id="btn-next" title="Next title">&raquo;</button>
+        <span id="nowtime" class="dur">--:-- / --:--</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2>Schedule <span id="schcount" class="muted"></span></h2>
     <div id="schedule" class="schlist"></div>
   </div>
@@ -106,6 +123,9 @@
   var library = [];
   var dragIndex = null;
   var lastUnreachable = [];
+  var lastStatus = null;
+  var scrubbing = false;
+  var bannerTimer = null;
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -131,9 +151,17 @@
 
   function showBanner(text, kind) {
     var banner = $("banner");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
     if (!text) { banner.style.display = "none"; banner.textContent = ""; return; }
     banner.textContent = text;
     banner.className = kind || "warn";
+    if (kind === "info") {
+      bannerTimer = setTimeout(function () {
+        banner.style.display = "none";
+        banner.textContent = "";
+        bannerTimer = null;
+      }, 4000);
+    }
   }
 
   function outcomeBanner(outcome) {
@@ -224,6 +252,15 @@
 
       var btns = document.createElement("div");
       btns.className = "rowbtns";
+      if (entry.reachable && entry.station_index !== null && entry.station_index !== undefined) {
+        var jump = document.createElement("button");
+        jump.textContent = "\u25B6";
+        jump.title = "Jump to this title now";
+        (function (stationIndex) {
+          jump.addEventListener("click", function () { seek(stationIndex, 0); });
+        })(entry.station_index);
+        btns.appendChild(jump);
+      }
       var up = document.createElement("button");
       up.textContent = "\u2191";
       up.title = "Move up";
@@ -357,19 +394,65 @@
 
   $("filter").addEventListener("input", renderLibrary);
 
+  function seek(index, offsetSecs) {
+    api("/api/seek", "POST", { index: index, offset_secs: offsetSecs }).then(function (outcome) {
+      showBanner("Seeked to '" + outcome.title + "' at " + fmt(outcome.offset_secs), "info");
+      refreshOnAir();
+    }).catch(function (err) {
+      showBanner(String(err.message || err), "error");
+    });
+  }
+
   function refreshOnAir() {
     api("/api/status").then(function (s) {
+      lastStatus = s;
       var text = s.admin_only
         ? "ADMIN ONLY \u00b7 no playback"
         : (s.playing ? "ON AIR: " + s.title : "off air (nobody watching)");
       if (s.viewers) text += " \u00b7 " + s.viewers + " viewer(s)";
       $("onair").textContent = text;
+
+      $("nowtitle").textContent = s.index === null ? "no programming" : s.title;
+      $("nowtime").textContent = fmt(s.offset_secs) + " / " + fmt(s.duration_secs);
+      if (!scrubbing) {
+        var fraction = s.duration_secs > 0 ? s.offset_secs / s.duration_secs : 0;
+        $("scrub").value = String(Math.round(fraction * 1000));
+      }
+      var seekable = !s.admin_only && s.index !== null && s.count > 0;
+      $("btn-prev").disabled = !seekable;
+      $("btn-next").disabled = !seekable;
+      $("scrub").disabled = !seekable;
     }).catch(function () {});
   }
 
+  function scrubFraction() {
+    return Number($("scrub").value) / 1000;
+  }
+
+  $("scrub").addEventListener("pointerdown", function () { scrubbing = true; });
+  $("scrub").addEventListener("input", function () {
+    if (!lastStatus) return;
+    $("nowtime").textContent = fmt(AdminCore.offsetFromFraction(lastStatus.duration_secs, scrubFraction()))
+      + " / " + fmt(lastStatus.duration_secs);
+  });
+  $("scrub").addEventListener("change", function () {
+    scrubbing = false;
+    if (!lastStatus || lastStatus.index === null) return;
+    seek(lastStatus.index, AdminCore.offsetFromFraction(lastStatus.duration_secs, scrubFraction()));
+  });
+
+  $("btn-prev").addEventListener("click", function () {
+    if (!lastStatus || lastStatus.index === null || !lastStatus.count) return;
+    seek((lastStatus.index - 1 + lastStatus.count) % lastStatus.count, 0);
+  });
+  $("btn-next").addEventListener("click", function () {
+    if (!lastStatus || lastStatus.index === null || !lastStatus.count) return;
+    seek((lastStatus.index + 1) % lastStatus.count, 0);
+  });
+
   reload();
   refreshOnAir();
-  setInterval(refreshOnAir, 5000);
+  setInterval(refreshOnAir, 3000);
 })();
 </script>
 </body>

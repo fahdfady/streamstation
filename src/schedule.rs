@@ -64,6 +64,8 @@ pub struct ScheduleEntryView {
     pub title: String,
     pub duration_secs: Option<f64>,
     pub reachable: bool,
+    /// Index in the station (playable entries only); None when unreachable.
+    pub station_index: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -76,10 +78,11 @@ pub struct ScheduleView {
 pub async fn view(rt: &StationRuntime) -> Result<ScheduleView> {
     let schedule = ScheduleFile::load(&rt.cfg.schedule_path)?.unwrap_or_default();
     let station = rt.station.read().await.clone();
-    let playable: HashMap<PathBuf, Duration> = station
+    let playable: HashMap<PathBuf, (usize, Duration)> = station
         .entries
         .iter()
-        .map(|e| (e.path.clone(), e.duration))
+        .enumerate()
+        .map(|(i, e)| (e.path.clone(), (i, e.duration)))
         .collect();
 
     let entries = schedule
@@ -87,7 +90,7 @@ pub async fn view(rt: &StationRuntime) -> Result<ScheduleView> {
         .into_iter()
         .enumerate()
         .map(|(index, path)| {
-            let duration = playable.get(&path).copied();
+            let playable = playable.get(&path).copied();
             let title = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -96,8 +99,9 @@ pub async fn view(rt: &StationRuntime) -> Result<ScheduleView> {
                 index,
                 path,
                 title,
-                duration_secs: duration.map(|d| d.as_secs_f64()),
-                reachable: duration.is_some(),
+                duration_secs: playable.map(|(_, d)| d.as_secs_f64()),
+                reachable: playable.is_some(),
+                station_index: playable.map(|(i, _)| i),
             }
         })
         .collect();
@@ -161,6 +165,60 @@ pub async fn shuffle(rt: &Arc<StationRuntime>, mode: ShuffleMode) -> Result<Appl
         }
     };
     apply_locked(rt, entries).await
+}
+
+#[derive(Serialize)]
+pub struct SeekOutcome {
+    pub index: usize,
+    pub offset_secs: f64,
+    pub title: String,
+}
+
+/// Move the station's playhead like a VLC seek: re-anchor the epoch so the
+/// wall-clock model itself now reads `index` + `offset`. Persisted in
+/// schedule.toml, so the new position survives restarts. The station swap
+/// bumps the generation, which makes the supervisor restart ffmpeg and every
+/// viewer re-attach - even when the movie index did not change.
+pub async fn seek(rt: &Arc<StationRuntime>, index: usize, offset_secs: f64) -> Result<SeekOutcome> {
+    let _guard = rt.rescan_lock.lock().await;
+    let cfg = &rt.cfg;
+
+    let station = rt.station.read().await.clone();
+    let entry = station
+        .entries
+        .get(index)
+        .with_context(|| format!("no movie at station index {index}"))?;
+    let offset = Duration::from_secs_f64(offset_secs.clamp(0.0, entry.duration.as_secs_f64()));
+    let target = entry.start + offset;
+    let title = entry.title.clone();
+
+    let new_epoch = reanchored_epoch(target, SystemTime::now());
+    let mut schedule = ScheduleFile::load(&cfg.schedule_path)?.unwrap_or_default();
+    schedule.epoch_unix = Some(time_to_unix(new_epoch));
+    schedule.save(&cfg.schedule_path)?;
+
+    let entries: Vec<(PathBuf, Duration)> = station
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e.duration))
+        .collect();
+    rt.swap_station(Arc::new(Station::new(entries, new_epoch)))
+        .await;
+
+    info!(
+        "seek: '{}' at {:.0}s (grid re-anchored)",
+        title,
+        offset.as_secs_f64()
+    );
+    Ok(SeekOutcome {
+        index,
+        offset_secs: offset.as_secs_f64(),
+        title,
+    })
+}
+
+fn reanchored_epoch(target: Duration, now: SystemTime) -> SystemTime {
+    now.checked_sub(target).unwrap_or(UNIX_EPOCH)
 }
 
 async fn apply_locked(rt: &Arc<StationRuntime>, entries: Vec<PathBuf>) -> Result<ApplyOutcome> {
@@ -340,6 +398,39 @@ mod tests {
             ]
         );
         assert_eq!(unreachable, vec![PathBuf::from("/missing.mp4")]);
+    }
+
+    #[test]
+    fn seek_reanchors_epoch() {
+        let items = vec![
+            (PathBuf::from("/a.mp4"), Duration::from_secs(100)),
+            (PathBuf::from("/b.mp4"), Duration::from_secs(50)),
+        ];
+        let station = Station::new(items, SystemTime::UNIX_EPOCH);
+        let now = UNIX_EPOCH + Duration::from_secs(30);
+
+        // While sitting at 30s of movie 0, seek to 10s of movie 1.
+        let target = station.entries[1].start + Duration::from_secs(10);
+        let epoch = reanchored_epoch(target, now);
+        let seeked = Station::new(
+            station
+                .entries
+                .iter()
+                .map(|e| (e.path.clone(), e.duration))
+                .collect(),
+            epoch,
+        );
+
+        let pb = seeked.position_at(now).unwrap();
+        assert_eq!(pb.index, 1);
+        assert_eq!(pb.offset, Duration::from_secs(10));
+
+        // And it keeps advancing from there.
+        let pb = seeked
+            .position_at(now + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(pb.index, 1);
+        assert_eq!(pb.offset, Duration::from_secs(15));
     }
 
     #[test]

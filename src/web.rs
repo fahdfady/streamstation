@@ -1,6 +1,6 @@
 use crate::broadcaster::StationRuntime;
 use crate::schedule::{self, ApplyOutcome, ScheduleFile, ShuffleMode};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
@@ -24,6 +24,7 @@ pub fn router(rt: Arc<StationRuntime>) -> Router {
         .route("/api/rescan", post(rescan))
         .route("/api/schedule", get(schedule_get).put(schedule_put))
         .route("/api/schedule/shuffle", post(schedule_shuffle))
+        .route("/api/seek", post(seek))
         .route("/api/library", get(library))
         .route("/hls/index.m3u8", get(playlist))
         .route("/hls/{name}", get(segment))
@@ -54,6 +55,9 @@ async fn admin_core() -> Response {
 struct StatusResponse {
     playing: bool,
     admin_only: bool,
+    /// Bumped whenever the station is swapped (seek / schedule edit); players
+    /// re-attach when it changes.
+    seq: u64,
     viewers: usize,
     count: usize,
     index: Option<usize>,
@@ -88,6 +92,7 @@ async fn status(State(rt): State<Arc<StationRuntime>>) -> Json<StatusResponse> {
     Json(StatusResponse {
         playing: rt.is_playing(),
         admin_only: rt.cfg.admin_only,
+        seq: rt.generation(),
         viewers: rt.presence.count(),
         count: station.entries.len(),
         index,
@@ -171,6 +176,31 @@ async fn schedule_shuffle(
     let outcome = schedule::shuffle(&rt, mode).await?;
     schedule::exit_if_empty(&rt, &outcome);
     Ok(Json(outcome))
+}
+
+#[derive(Deserialize)]
+struct SeekRequest {
+    /// Station index; defaults to whatever the clock says is playing now.
+    index: Option<usize>,
+    #[serde(default)]
+    offset_secs: f64,
+}
+
+async fn seek(
+    State(rt): State<Arc<StationRuntime>>,
+    Json(req): Json<SeekRequest>,
+) -> Result<Json<schedule::SeekOutcome>, ApiError> {
+    let index = match req.index {
+        Some(index) => index,
+        None => {
+            let station = rt.station.read().await.clone();
+            station
+                .position_at(SystemTime::now())
+                .map(|pb| pb.index)
+                .context("nothing is playing")?
+        }
+    };
+    Ok(Json(schedule::seek(&rt, index, req.offset_secs).await?))
 }
 
 #[derive(Serialize)]

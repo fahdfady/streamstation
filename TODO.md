@@ -19,21 +19,6 @@ files next to it.
 - Burn-in via `-vf subtitles=...` is an option if track muxing proves flaky,
   but then subtitles can't be toggled per viewer.
 
-## Seek / timeline control from /admin
-
-Move the station's playhead through the current movie like VLC would, from the
-admin page.
-
-- `POST /api/seek { index?, offset_secs }` plus "previous / next" buttons.
-- Implementation: the supervisor kills ffmpeg and respawns it with a new `-ss`
-  (same machinery as skipping an unreachable movie). All viewers jump together;
-  the browser re-attaches on the next `/api/status` poll.
-- Decide the semantics: **ephemeral** (playback diverges from the wall-clock
-  schedule until the next movie boundary) vs **re-anchor** (shift the stored
-  `epoch` by the delta so the grid follows the seek). Ephemeral is simpler;
-  re-anchoring keeps `(now - epoch) % total` honest.
-- Also useful: jump-to-title (seek to `index` at offset 0).
-
 ## File health ping in /admin
 
 Right now reachability comes from a cheap existence + duration-cache check

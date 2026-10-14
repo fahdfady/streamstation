@@ -74,6 +74,7 @@
   var overlay = document.getElementById("overlay");
   var hls = null;
   var attachedIndex = null;
+  var attachedSeq = null;
   var reattachTimer = null;
   var lastMediaTime = -1;
   var lastMediaProgressAt = performance.now();
@@ -123,6 +124,7 @@
   function destroy() {
     if (hls) { hls.destroy(); hls = null; }
     attachedIndex = null;
+    attachedSeq = null;
   }
 
   function scheduleReattach() {
@@ -134,7 +136,7 @@
     }, 3000);
   }
 
-  function attach(index) {
+  function attach(index, seq) {
     destroy();
     var url = "/hls/index.m3u8";
     if (window.Hls && Hls.isSupported()) {
@@ -155,6 +157,7 @@
       video.addEventListener("error", scheduleReattach, { once: true });
     }
     attachedIndex = index;
+    attachedSeq = seq;
     video.play().then(function () {
       overlay.hidden = true;
     }).catch(function () {
@@ -200,8 +203,8 @@
 
       if (!s.playing) {
         destroy();
-      } else if (attachedIndex !== s.index) {
-        attach(s.index);
+      } else if (attachedIndex !== s.index || attachedSeq !== s.seq) {
+        attach(s.index, s.seq);
       }
       watchdog();
     }).catch(function () {});

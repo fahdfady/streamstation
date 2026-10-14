@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const code = readFileSync(join(root, "web", "admin-core.js"), "utf8");
 (0, eval)(code);
-const { moveEntry, removeEntry, appendEntries } = globalThis.AdminCore;
+const { moveEntry, removeEntry, appendEntries, offsetFromFraction } = globalThis.AdminCore;
 
 let failures = 0;
 function check(cond, message) {
@@ -39,5 +39,11 @@ check(names(base) === "a,b,c,d", "removeEntry does not mutate the input");
 const added = appendEntries(base, [row("e"), row("a"), row("f")]);
 check(names(added) === "a,b,c,d,e,f", "append adds only new paths, no duplicates");
 check(names(base) === "a,b,c,d", "appendEntries does not mutate the input");
+
+check(offsetFromFraction(100, 0.5) === 50, "scrub: half of a 100s movie is 50s");
+check(offsetFromFraction(100, 2) === 100, "scrub: fraction above 1 clamps to the end");
+check(offsetFromFraction(100, -1) === 0, "scrub: fraction below 0 clamps to the start");
+check(offsetFromFraction(0, 0.5) === 0, "scrub: zero duration gives 0");
+check(offsetFromFraction(NaN, 0.5) === 0, "scrub: bad duration gives 0");
 
 process.exitCode = failures > 0 ? 1 : 0;
